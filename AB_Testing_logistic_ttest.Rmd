@@ -1,0 +1,447 @@
+---
+title: "A/B Testing using T-test/Permutation Test and Logistic Regression"
+author: "ASLIHAN_DEMIRKAYA"
+output: 
+
+ md_document:
+    toc: yes
+    variant: markdown_github
+---
+
+
+## Introduction 
+
+In this work, we are going to present two problems. In this first one, our response variable will be numerical, so we will apply A/B test using t-test and a permutation test. In the second problem, our response variable will be categorical, so we will apply logistic regression.  Note that we will use the packages `powerMediation`, `pwr` and `infer` for these tests in addition to `tidyverse`, `broom` and `ggplot2`.
+
+
+
+
+##  A/B Testing using T-test and Permutation Test 
+### **<span style="color:red">Problem 1: Google or S&P 500?</span>**
+
+In this section, we will first work on the question: If one invests $100 daily, does he make more or less money in average by investing his money on Google stock than S&P 500? Or the difference in the means is not significant enough.  Secondly, we will change "daily" to "quarterly" (3 monthly) and answer the same question. 
+
+#### Stating the null and alternative hypotheses:
+
+Let's say the mean daily_return for google is $\mu_1$ and snp500 is $\mu_2$. Then our null and alternative hypotheses are:
+
+$H_0$: $\mu_1-\mu_2=0$
+
+$H_A$: $\mu_1-\mu_2\neq 0$
+
+#### Constructing the data set
+
+Using the websites:
+https://finance.yahoo.com/quote/%5EGSPC/history?p=%5EGSPC
+ https://finance.yahoo.com/quote/GOOG/history?p=GOOG&.tsrc=fin-srch, 
+ we downloaded the last 10 years of the stock price data for Google and S&P 500. 
+
+```{r}
+library(tidyverse)
+google_data<-read.csv("GOOG.csv")
+glimpse(google_data)
+snp500_data<-read.csv("GSPC.csv")
+glimpse(snp500_data)
+```
+
+#### Defining a new variable
+
+We are going to define a new variable `daily_return`. The formula we are going to use is as follows:
+
+$$\text{daily_return}=\frac{Close}{Open}*100-100$$
+We are going to add this new feature to our data sets: `google_data` and `snp500_data` and name them as ` google_data_added` and `snp500_data_added`.
+
+```{r}
+google_data_added<-google_data%>%
+  mutate(daily_return=Close/Open*100-100)
+glimpse(google_data_added)
+```
+
+```{r}
+snp500_data_added<-snp500_data%>%
+  mutate(daily_return=Close/Open*100-100)
+glimpse(snp500_data_added)
+```
+
+Now we are going to construct a new data frame `df` that has both the variable `daily_return` and the condition that is either `google` or `snp500`. 
+
+```{r}
+df1 = data.frame(daily_return = google_data_added$daily_return, condition = rep("google",nrow(google_data_added)))
+df2 = data.frame(daily_return = snp500_data_added$daily_return, condition = rep("snp500",nrow(snp500_data_added)))
+
+df<-rbind(df1,df2)
+glimpse(df)
+```
+
+
+#### pwr.t.test() 
+First, let's check how many observations we should  have for a test with 80% power. We need `pwr` package to find that number.
+
+```{r}
+# Load package to run power analysis
+library(pwr)
+
+# Run power analysis for t-test
+sample_size <- pwr.t.test(d =0.5,
+                          sig.level = 0.05,
+                          power = 0.8)
+sample_size
+```
+We see that we should have at least 64 observations for each condition. We have 2517 observations for each condition. 
+
+Now, let's plot the histograms for each condition and see how their distributions look like.
+
+```{r}
+ggplot(df, mapping = aes(x=daily_return)) +
+  # Add a histogram layer
+  geom_histogram() +
+  # Facet by class
+  facet_wrap(~condition)
+```
+
+Looking at the histograms, we can tell that they do not look like very normal and the variability in "snp500" looks smaller than "google". We can calculate the means and the standard deviations as follows:
+
+
+```{r}
+df %>%
+  # Group by class
+  group_by(condition) %>%
+  # Calculate the std dev of wordsum as std_dev_wordsum
+  summarize(mean=mean(daily_return),std_dev_responses=sd(daily_return))
+```
+As we calculated the standard deviation for each condition, we got unequal standard deviations. Note that in R, the default setting in t.test is var.equal = FALSE which means it assumes the samples could have different standard deviations, so we will not violate that assumption.
+
+#### Applying t-test
+
+Let's use the `t.test()` function, setting the dependent variable to the column referring to `daily_return` and the independent variable to the column for `condition`.
+
+```{r}
+# Run t-test
+experiment_results <-t.test(daily_return ~ condition,
+                                data = df)
+experiment_results
+```
+
+Since the p-value=0.1807 is bigger than the significance level=0.05, we do not have enough evidence to reject the null hypothesis, implies that it can't be said that there is a significant difference between the means of daily returns of "google" and "spn500" for the years 2009-2019.
+
+#### T-test vs. linear regression
+
+We will use linear regression and compare our results with previously obtained t-test results.
+
+```{r}
+lm(daily_return ~ condition, data = df) %>%
+  summary()
+```
+
+Looking at the statistics of `lm` model, we get the same conclusion since the p-values are bigger than the significance level.
+
+Note that even though we applied `lm`, we shouldn't have had. Because when we look at *the normal probablity plot of residuals* , as seen below, we end up with an "s" shape, which is far from the solid line at the tails. This implies that the residuals are not normal so it violates the assumption for the `lm` model.
+
+```{r}
+daily_return.lm=lm(daily_return ~ condition, data=df) 
+daily_return.stdres=rstandard(daily_return.lm)
+qqnorm(daily_return.stdres)
+qqline(daily_return.stdres)
+```
+
+#### Using `infer` package to perform a permentation test for the difference between mean `daily_return` for `google` and `snp500`  
+
+Besides traditional models like t-test and `lm` model, [since some required assumptions were not satisfied], we will now use `infer` package to perform a permutation test for the difference between mean `daily_return` for `google` and `snp500`.
+
+First, we start by finding the observed mean difference. The following R-code helps us find that difference. 
+
+
+```{r}
+# Calculate observed difference in means
+ mean_daily_return<-df %>%
+  # Group by habit group
+  group_by(condition) %>%
+  # Calculate mean weight for each group
+  summarize(mean_daily_returns = mean(daily_return)) 
+mean_daily_return
+```
+
+```{r}
+diff_mean_obs<- mean_daily_return$mean_daily_returns[1]- mean_daily_return$mean_daily_returns[2]
+diff_mean_obs
+```
+
+
+The observed mean difference is found as -0.03896583. 
+
+Now we are going to construct a null distribution using `permute`. In the following R-code, we generate 1500 samples and the `stat` are the mean differences between the two conditions for 1500 samples.
+
+
+```{r}
+library(infer)
+set.seed(123)
+n_replicates <- 1500
+# Generate 1500 differences in means via randomization
+diff_mean_ht <- df %>% 
+  # Specify daily_return vs. condition
+  specify(daily_return~condition) %>% 
+  # Null = no difference between means
+  hypothesize(null="independence") %>% 
+  # Shuffle labels 1500 times
+  generate(reps=1500, type="permute") %>%
+  # Calculate test statistic, google then snp500
+  calculate(stat="diff in means", c("google", "snp500"))
+
+# See the result
+head(diff_mean_ht)
+```
+
+####  Computing p-value 
+
+Since we have a two-tail test, we will find the area where the stat is less than the observed data and then we will multiply it by two. The following code does it for us.
+
+
+```{r}
+# pvalue 
+
+diff_mean_ht %>%
+  # Identify simulated test statistics at least as extreme as observed
+  filter(stat<diff_mean_obs) %>%
+  # Calculate p-value
+  summarize(
+    one_sided_p_val = n()/n_replicates,
+    two_sided_p_val = 2*one_sided_p_val)
+```
+
+The two-sided p-value is calculated as 0.1786 which is bigger than the significance level, so we do not have enough evidence to reject the null hypothesis. That means that we do not have enough evidence to reject the null hypothesis: there is no significant difference between the daily return means of google and snp500.
+
+### Calculating the Quarterly-return
+
+```{r}
+google_data_reduced<-google_data[seq(1,2517,60),] 
+google_data_q<-google_data_reduced%>%
+  mutate(monthly_return=Close/Open*100-100)
+glimpse(google_data_q)
+```
+
+```{r}
+snp500_data_reduced<-snp500_data[seq(1,2517,60),] #picks the data at 3, 6.. months. (assume 1 month has 20 business days)
+snp500_data_q<-snp500_data_reduced%>%
+  mutate(monthly_return=Close/Open*100-100)
+glimpse(snp500_data_q)
+```
+
+
+
+Now we are going to construct a new data frame `dfq` that has the variable `monthly_return` and the stock it belongs to. 
+
+```{r}
+
+df1q = data.frame(monthly_return = google_data_q$monthly_return, condition = rep("google",nrow(google_data_q)))
+df2q = data.frame(monthly_return = snp500_data_q$monthly_return, condition = rep("snp500",nrow(snp500_data_q)))
+
+dfq<-rbind(df1q,df2q)
+glimpse(dfq)
+
+```
+
+
+#### Applying t-test
+
+Let's use the `t.test()` function, setting the dependent variable to the column referring to `daily_return` and the independent variable to the column for `condition`.
+
+```{r}
+# Run t-test
+experiment_results_q <-t.test(monthly_return ~ condition,
+                                data = dfq)
+experiment_results_q
+```
+
+As in the previous case, the statistcis show us that we do not have enough evidence to reject the null hypothesis, implies that it can't be said that there is a significant difference between the means of quarterly returns of "google" and "spn500" for the years 2009-2019.
+
+
+
+
+## A/B Testing using logistic regression
+### <span style="color:blue">**Problem 2: New page or old page? **</span>
+
+In this section, we will investigate two versions of a single variable [in this case it is `group`], by testing a subject's response [in this case it is `converted` and it is a categorical variable] to variant A [`control`] against variant B [`treatment`]. After doing the analysis,  we will determine which of the two variants is more effective. First, let's start by exploring the data.
+
+
+### Exploring the Data Set
+
+Let's glimpse our dataset: `ab_data.csv` by using `glimpse` function of `tidyverse` package.
+```{r}
+library(tidyverse)
+ab_data<-read.csv("ab_data.csv")
+glimpse(ab_data)
+```
+
+We have 294,478 observations and 5 variables. Let's see how many observations we have in the control and treatment group. Notice that `group` and `landing_page` are dependent variables. We can see that by using `cor` function as follows:
+
+
+```{r}
+ab_data$group2<-ifelse(ab_data$group=="control", 0, 1)
+ab_data$landing_page2<-ifelse(ab_data$landing_page=="old_page", 0, 1)
+```
+
+```{r}
+cor(ab_data$group2,ab_data$landing_page2)
+```
+The reason why we didn't get the correlation as equal to 1 is we believe that there are some typos in the data set. So will focus on the variable `group` that has the control and the test data, not the `landing_page`.
+
+```{r}
+ab_data %>%
+  filter((group=="control" & landing_page=="new_page")|(group=="treatment" & landing_page=="old_page"))%>%
+  count()
+```
+
+We believe that 3893 out of  294,478 observations had typos.
+
+
+
+```{r}
+table(ab_data$group  )
+```
+We see that the number of observations in the control group is almost the same as the number of observations in the treatment group. We can say that the split is 50-50%.
+
+
+
+#### Baseline Conversion Rates
+
+First, let's divide our data set into two where the first one has the control group and the second is the treatment group. We will calculate baseline conversion rates for the control group.
+
+```{r}
+ab_data_control<-ab_data %>%
+   filter(group =="control")
+head(ab_data_control)
+```
+
+Let's calculate the conversion rate for our control group.
+
+```{r}
+ab_control_sum_all<-ab_data_control %>%
+   summarize(conversion_rate = mean(converted))
+ab_control_sum_all
+```
+
+
+#### Current conversion rate by day of a week
+
+Let's start by computing our pre-experiment conversion rate as a baseline. Let's compute it by day of a week. Since the month is January in all observations, it makes no sense to group by month.
+
+Using the function `weekday()` from the package `lubridate`, we can compute the conversion rate by month.
+Take a look at the data to see how much conversion rates vary throughout the week.
+
+```{r}
+library(lubridate)
+ab_base_sum<-ab_data_control%>%
+  group_by(weekdays(mdy(timestamp))) %>%
+  summarize(conversion_rate = mean(converted))
+ab_base_sum
+```
+
+```{r}
+library(ggplot2)
+ggplot(ab_base_sum, aes(x = `weekdays(mdy(timestamp))`, y = conversion_rate)) +
+geom_point() +
+geom_line()
+```
+
+It seems like the conversion rate is the highest on Saturday and lowest on Friday. 
+
+
+### Plotting results
+
+We are going to stary this section by plotting the two conversion rates, one for the treatment condition and one for the control condition. 
+
+
+```{r}
+# Group and summarize data
+aba_data_sum <- ab_data %>%
+  group_by(group, weekdays(mdy(timestamp))) %>%
+  summarize(conversion_rate = mean(converted))
+aba_data_sum
+```
+
+
+```{r}
+# Make plot of conversion rates over time
+ggplot(aba_data_sum,
+       aes(x = `weekdays(mdy(timestamp))`,
+           y = conversion_rate,
+           color = group,
+           group = group)) +
+  geom_point() +
+  geom_line()+
+labs(x = "Day",
+       y = "Conversion Rate")
+```
+
+### Analyzing results
+
+To analyze our results, we will use the function `glm()` and set family to "binomial". [since the variable `converted` is a categorical variable. ]
+
+
+
+```{r}
+# Load package for cleaning model results
+library(broom)
+ab_data %>%
+  group_by(group) %>%
+  summarize(conversion_rate = mean(converted))
+
+
+# Run logistic regression
+results <- glm(converted ~ group,
+                          family = "binomial",
+                          data = ab_data) %>%
+tidy()
+results
+```
+
+We found that there is not a significant difference between the groups "control" and "treatment" since our p-value was about 0.21, which is not less than 0.05. 
+
+
+
+#### Power analysis Tuesday
+
+Now we will run a power analysis assuming we were going to run the experiment on Tuesday. The reason why we picked that day is it is the only day treatment group has a higher conversion rate than the control group.  To get a significant difference between the control and the treatment groups, we will find the smallest size to run our experiment. In order to do that, we will use `powerMediation` package.  Remember that the conversion rate on Tuesday for the control group is 0.1166688. Assume our desired conversion rate for the treatment group is 0.123, then we compute and look at sample size as follows:
+
+```{r}
+library(powerMediation)
+# Compute and look at sample size for the experiment on Tuesdays
+total_sample_size <- SSizeLogisticBin(p1 = 0.116, # rounded conversion rate for Tuesday control group
+                                      p2 = 0.125,
+                                      B = 0.5, 
+                                      alpha = 0.05,
+                                      power = 0.8)
+total_sample_size
+
+```
+
+We now know if we ran the experiment on Tuesday we would need at least 41076 data points or 20538 per group.
+
+#### <span style="color:blue">*Sample Size for Tuesday in the data set*</span>
+First, let's count the number of observations made on Tuesday.
+```{r}
+ab_count_Tuesday<-ab_data_control%>%
+  filter(weekdays(mdy(timestamp))=="Tuesday")%>%
+  count()
+ab_count_Tuesday
+```
+
+ We have 23931 observations for Tuesday in the control group which is more than the minimum number required 20538. 
+ 
+ 
+```{r}
+# Load package for cleaning model results
+library(broom)
+ab_data_Tuesday<-ab_data %>%
+ filter(weekdays(mdy(timestamp))=="Tuesday")
+
+# Run logistic regression
+results <- glm(converted ~ group,
+                          family = "binomial",
+                          data = ab_data_Tuesday) %>%
+tidy()
+results
+```
+
+Looking at the statistics, we can't say there is a significant difference between the groups "control" and "treatment" even on Tuesday since our p-value was about 0.06428184, which is not less than 0.05. 
+
